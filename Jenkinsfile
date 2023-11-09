@@ -1,82 +1,118 @@
-pipeline {
+@Library('Jenkins_shared_library') _
+def COLOR_MAP = [
+    'FAILURE' : 'danger',
+    'SUCCESS' : 'good'
+]
+
+pipeline{
     agent any
-
-    tools{
-        jdk 'jdk11'
-        maven 'maven3'
+    parameters {
+        choice(name: 'action', choices: 'create\ndelete', description: 'Select create or destroy.')
+        
+        string(name: 'DOCKER_HUB_USERNAME', defaultValue: 'sevenajay', description: 'Docker Hub Username')
+        string(name: 'IMAGE_NAME', defaultValue: 'youtube', description: 'Docker Image Name')
     }
-
+    tools{
+        jdk 'jdk17'
+        nodejs 'node16'
+    }
     environment {
         SCANNER_HOME=tool 'sonar-scanner'
     }
-
     stages{
-
-        stage("Git Checkout"){
+        stage('clean workspace'){
             steps{
-                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/jaiswaladi246/Petclinic.git'
+                cleanWorkspace()
             }
         }
-
-        stage("Compile"){
+        stage('checkout from Git'){
             steps{
-                sh "mvn clean compile"
+                checkoutGit('https://github.com/Aj7Ay/Youtube-clone-app.git', 'main')
             }
         }
-
-         stage("Test Cases"){
+        stage('sonarqube Analysis'){
+        when { expression { params.action == 'create'}}    
             steps{
-                sh "mvn test"
+                sonarqubeAnalysis()
             }
         }
-
-        stage("Sonarqube Analysis "){
+        stage('sonarqube QualitGate'){
+        when { expression { params.action == 'create'}}    
             steps{
-                withSonarQubeEnv('sonar-server') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Petclinic \
-                    -Dsonar.java.binaries=. \
-                    -Dsonar.projectKey=Petclinic '''
-
+                script{
+                    def credentialsId = 'Sonar-token'
+                    qualityGate(credentialsId)
                 }
             }
         }
-
-        stage("OWASP Dependency Check"){
+        stage('Npm'){
+        when { expression { params.action == 'create'}}    
             steps{
-                dependencyCheck additionalArguments: '--scan ./ --format HTML ', odcInstallation: 'DP'
+                npmInstall()
+            }
+        }
+        stage('Trivy file scan'){
+        when { expression { params.action == 'create'}}    
+            steps{
+                trivyFs()
+            }
+        }
+        stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
-
-         stage("Build"){
-            steps{
-                sh " mvn clean install"
-            }
-        }
-
-        stage("Docker Build & Push"){
+        stage('Docker Build'){
+        when { expression { params.action == 'create'}}    
             steps{
                 script{
-                   withDockerRegistry(credentialsId: '58be877c-9294-410e-98ee-6a959d73b352', toolName: 'docker') {
-
-                        sh "docker build -t image1 ."
-                        sh "docker tag image1 adijaiswal/pet-clinic123:latest "
-                        sh "docker push adijaiswal/pet-clinic123:latest "
-                    }
+                   def dockerHubUsername = params.DOCKER_HUB_USERNAME
+                   def imageName = params.IMAGE_NAME
+                   
+                   dockerBuild(dockerHubUsername, imageName)
                 }
             }
         }
-
-        stage("TRIVY"){
+        stage('Trivy iamge'){
+        when { expression { params.action == 'create'}}    
             steps{
-                sh " trivy image adijaiswal/pet-clinic123:latest"
+                trivyImage()
             }
         }
-
-        stage("Deploy To Tomcat"){
+        stage('Run container'){
+        when { expression { params.action == 'create'}}    
             steps{
-                sh "cp  /var/lib/jenkins/workspace/CI-CD/target/petclinic.war /opt/apache-tomcat-9.0.65/webapps/ "
+                runContainer()
+            }
+        }
+        stage('Remove container'){
+        when { expression { params.action == 'delete'}}    
+            steps{
+                removeContainer()
+            }
+        }
+        stage('Kube deploy'){
+        when { expression { params.action == 'create'}}    
+            steps{
+                kubeDeploy()
+            }
+        }
+        stage('kube deleter'){
+        when { expression { params.action == 'delete'}}    
+            steps{
+                kubeDelete()
             }
         }
     }
+    post {
+    always {
+        echo 'Slack Notifications'
+        slackSend (
+            channel: '#channel name',   #change your channel name
+            color: COLOR_MAP[currentBuild.currentResult],
+            message: "*${currentBuild.currentResult}:* Job ${env.JOB_NAME} \n build ${env.BUILD_NUMBER} \n More info at: ${env.BUILD_URL}"
+        )
+    }
+}
 }
